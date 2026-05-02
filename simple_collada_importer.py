@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Simple COLLADA (.dae) Importer (Positions + Normals + Colors + UVs)",
-    "author": "ekztal / MilesExilium",
-    "version": (3, 3, 0),
+    "name": "Simple COLLADA (.dae) Importer",
+    "author": "ekztal / MilesExilium / RebeccaNod1",
+    "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import > Simple COLLADA (.dae)",
-    "description": "Imports COLLADA meshes with positions, normals, UVs, vertex colors, textures, armature and skin weights.",
+    "description": "Imports COLLADA (.dae) files that contain meshes with positions, normals, UVs, vertex colors, textures, armature and skin weights.",
     "category": "Import-Export",
     "support": "COMMUNITY",
 }
@@ -52,6 +52,38 @@ def parse_matrix(text):
     if len(vals) != 16:
         return Matrix.Identity(4)
     return Matrix([vals[0:4], vals[4:8], vals[8:12], vals[12:16]])
+
+def parse_node_transform(node, ns):
+    """
+    Parse all COLLADA transform tags on a node in order and return
+    their combined 4x4 Matrix. Handles <matrix>, <translate>,
+    <rotate>, and <scale> so that DAEs using individual transforms
+    (instead of a single <matrix>) are placed correctly.
+    """
+    combined = Matrix.Identity(4)
+    for child in node:
+        tag = child.tag.replace(ns, "")
+        if not child.text:
+            continue
+        if tag == "matrix":
+            combined @= parse_matrix(child.text)
+        elif tag == "translate":
+            v = [float(x) for x in child.text.split()]
+            if len(v) == 3:
+                combined @= Matrix.Translation(Vector(v))
+        elif tag == "rotate":
+            vals = [float(x) for x in child.text.split()]
+            if len(vals) == 4:
+                axis  = Vector(vals[:3])
+                angle = math.radians(vals[3])
+                if axis.length > 1e-6:
+                    combined @= Matrix.Rotation(angle, 4, axis)
+        elif tag == "scale":
+            s = [float(x) for x in child.text.split()]
+            if len(s) == 3:
+                combined @= Matrix.Diagonal(Vector((s[0], s[1], s[2], 1.0)))
+    return combined
+
 
 def get_up_axis_matrix(root, ns):
     asset = root.find(q(ns, "asset"))
@@ -505,7 +537,7 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                               arm_obj, controllers, ctrl_mat_override, dae_filepath,
                               import_uvs=True, import_normals=True,
                               import_vertex_colors=True, merge_vertices=False,
-                              merge_threshold=0.0001, correction_mat=None):
+                              merge_threshold=0.0001):
     mesh_elem = geom_elem.find(q(ns, "mesh"))
     if mesh_elem is None:
         return None
@@ -560,7 +592,8 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         max_offset = 0
         for inp in prim.findall(q(ns, "input")):
             sem   = inp.attrib.get("semantic")
-            src   = inp.attrib.get("source", "")[1:]
+            src_val = inp.attrib.get("source", "")
+            src   = src_val[1:] if src_val.startswith("#") else src_val
             off   = int(inp.attrib.get("offset", "0"))
             set_i = inp.attrib.get("set")
             all_inputs.append((sem, src, off, set_i))
@@ -582,7 +615,37 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                 pos_source_id = vertices_map.get(src)
                 break
 
-        if vertex_offset is None or pos_source_id is None:
+        # Fallback 1: some exporters use POSITION directly instead of VERTEX
+        if pos_source_id is None:
+            for off, (sem, src, _) in input_by_offset.items():
+                if sem == "POSITION":
+                    vertex_offset = off
+                    pos_source_id = src
+                    break
+
+        # Fallback 2: match by source ID containing "position" (Second Life etc.)
+        if pos_source_id is None:
+            for src_id in sources.keys():
+                if "position" in src_id.lower():
+                    pos_source_id = src_id
+                    for off, (s_sem, s_src, _) in input_by_offset.items():
+                        if s_src == pos_source_id:
+                            vertex_offset = off
+                            break
+                    break
+
+        # Last resort: any source ID containing "pos"
+        if pos_source_id is None:
+            for src_id in sources.keys():
+                if "pos" in src_id.lower():
+                    pos_source_id = src_id
+                    for off, (s_sem, s_src, _) in input_by_offset.items():
+                        if s_src == pos_source_id:
+                            vertex_offset = off
+                            break
+                    break
+
+        if pos_source_id is None:
             print("Missing POSITION source in:", geom_name)
             return None
 
@@ -694,13 +757,6 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
             else:
                 positions = [tuple(x / s for x in p) for p in positions]
 
-    # Apply up-axis correction to non-rigged meshes (e.g. Y_UP map geometry).
-    # Rigged meshes are already handled via bind_shape_matrix above.
-    if skin_ctrl is None and correction_mat is not None:
-        corr3 = correction_mat.to_3x3()
-        positions    = [tuple(corr3 @ Vector(p)) for p in positions]
-        corner_norms = [tuple(corr3 @ Vector(n)) for n in corner_norms]
-
     mesh = bpy.data.meshes.new(geom_name)
     mesh.from_pydata([Vector(p) for p in positions], [], faces)
     mesh.update(calc_edges=True)
@@ -771,10 +827,16 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
 
         diff_path = channels.get("diffuse")
         if not diff_path:
+            # No texture path in DAE — set a visible mid-grey so mesh is not invisible
+            bsdf_n.inputs["Base Color"].default_value = (0.6, 0.6, 0.6, 1.0)
             return
 
         img = _load_img(diff_path)
         if not img:
+            # Texture file referenced but not found on disk — set a visible grey
+            # so the mesh is visible and the missing texture is obvious
+            bsdf_n.inputs["Base Color"].default_value = (0.8, 0.5, 0.2, 1.0)  # orange = "missing texture"
+            print(f"  Missing texture: '{diff_path}'")
             return
 
         tex_n          = nodes.new("ShaderNodeTexImage")
@@ -993,56 +1055,69 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
 
         geom_mat_override = build_ctrl_mat_map(root, ns, controllers)
 
-        geom_world_mat = {}
-        if is_assembly:
-            def _node_mat(node):
-                m = node.find(q(ns, "matrix"))
-                return parse_matrix(m.text) if (m is not None and m.text) else Matrix.Identity(4)
-
-            def _walk(node, parent_mat):
-                world = parent_mat @ _node_mat(node)
-                ig = node.find(q(ns, "instance_geometry"))
-                if ig is not None:
-                    gid = ig.attrib.get("url","")[1:]
-                    geom_world_mat.setdefault(gid, world)
-                for inn in node.findall(q(ns, "instance_node")):
-                    nid = inn.attrib.get("url","").lstrip("#")
-                    lib = root.find(q(ns, "library_nodes"))
-                    if lib is not None:
-                        tgt = lib.find(f".//{q(ns,'node')}[@id='{nid}']")
-                        if tgt is not None:
-                            _walk(tgt, world)
-                for child in node.findall(q(ns, "node")):
-                    _walk(child, world)
-
-            vs = root.find(f".//{q(ns,'visual_scene')}")
-            if vs is not None:
-                for node in vs.findall(q(ns, "node")):
-                    _walk(node, Matrix.Identity(4))
-
-        geometries = root.findall(f".//{q(ns,'geometry')}")
-        if not geometries:
+        # Build fast geometry lookup by id
+        geom_map = {g.attrib.get("id"): g for g in root.findall(f".//{q(ns,'geometry')}")}
+        if not geom_map:
             self.report({'ERROR'}, "No <geometry> found in DAE")
             return {'CANCELLED'}
 
         imported = 0
-        for geom in geometries:
-            geom_id      = geom.attrib.get("id", "")
-            mat_override = geom_mat_override.get(geom_id, {})
-            obj = build_mesh_from_geometry(
-                geom, ns, collection, material_texture_map,
-                arm_obj, controllers, mat_override, dae,
-                import_uvs=self.import_uvs,
-                import_normals=self.import_normals,
-                import_vertex_colors=self.import_vertex_colors,
-                merge_vertices=self.merge_vertices,
-                merge_threshold=self.merge_threshold,
-                correction_mat=correction_mat,
-            )
-            if obj:
-                if geom_id in geom_world_mat:
-                    obj.matrix_world = geom_world_mat[geom_id]
-                imported += 1
+
+        def walk_scene(node, parent_mat):
+            """
+            Recursively walk the visual scene, accumulating transforms.
+            Uses parse_node_transform so <translate>/<rotate>/<scale> nodes
+            are handled correctly, not just <matrix>.
+            correction_mat is applied at the root level so the whole scene
+            is rotated into Blender's Z-up space as object transforms,
+            rather than baking the rotation into every vertex.
+            """
+            nonlocal imported
+            local_mat = parse_node_transform(node, ns)
+            world_mat = parent_mat @ local_mat
+
+            # Instance geometry in this node
+            for ig in node.findall(q(ns, "instance_geometry")):
+                geom_url_val = ig.attrib.get("url", "")
+                geom_id = geom_url_val[1:] if geom_url_val.startswith("#") else geom_url_val
+                if geom_id in geom_map:
+                    mat_override = geom_mat_override.get(geom_id, {})
+                    obj = build_mesh_from_geometry(
+                        geom_map[geom_id], ns, collection, material_texture_map,
+                        arm_obj, controllers, mat_override, dae,
+                        import_uvs=self.import_uvs,
+                        import_normals=self.import_normals,
+                        import_vertex_colors=self.import_vertex_colors,
+                        merge_vertices=self.merge_vertices,
+                        merge_threshold=self.merge_threshold,
+                    )
+                    if obj:
+                        obj.matrix_world = world_mat
+                        imported += 1
+
+            # Instance node (library_nodes assembly)
+            for inn in node.findall(q(ns, "instance_node")):
+                nid_val = inn.attrib.get("url", "")
+                nid = nid_val.lstrip("#")
+                lib = root.find(q(ns, "library_nodes"))
+                if lib is not None:
+                    tgt = lib.find(f".//{q(ns,'node')}[@id='{nid}']")
+                    if tgt is not None:
+                        walk_scene(tgt, world_mat)
+
+            # Recurse into children
+            for child in node.findall(q(ns, "node")):
+                walk_scene(child, world_mat)
+
+        vs = root.find(f".//{q(ns,'visual_scene')}")
+        if vs is None:
+            self.report({'ERROR'}, "No <visual_scene> found in DAE")
+            return {'CANCELLED'}
+
+        # Apply correction_mat at the root so the whole scene rotates into
+        # Blender Z-up space as object-level transforms (not baked into vertices)
+        for node in vs.findall(q(ns, "node")):
+            walk_scene(node, correction_mat)
 
         if imported == 0:
             self.report({'ERROR'}, "No objects created. Check console.")
@@ -1190,5 +1265,4 @@ def unregister():
     bpy.utils.unregister_class(IMPORT_OT_simple_collada_full)
 
 if __name__ == "__main__":
-
     register()
