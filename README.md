@@ -68,5 +68,3 @@ The original add-on imported geometry with basic material name assignment but no
 + Tested on Blender 5.1.0 (Flatpak & Local)
 + Skin weights require the mesh and armature to be exported together in the same .dae file
 + Normal maps on models with multiple UV channels may need to be connected manually in the shader editor
-+ Skin weights require the mesh and armature to be exported together in the same .dae file
-+ Normal maps on models with multiple UV channels may need to be connected manually in the shader editor
