@@ -1,7 +1,7 @@
 # Blender-v5-DAE-Importer-Add-on
 A lightweight Blender 5 add-on that restores support for importing .dae (COLLADA) files after the official importer was removed in version 5.
 
-(Originally created by /u/varyingopinions on Reddit, ekztal on GitHub. Extended and reworked by MilesExilium.)
+(Originally created by /u/varyingopinions on Reddit, ekztal on GitHub. Extended and reworked by MilesExilium and RebeccaNod1.)
 
 ## Installation:
 
@@ -16,7 +16,7 @@ Enable Simple COLLADA (.dae)
 Import via File → Import → Simple COLLADA (.dae)
 
 
-## What's New (v0.9.5):
+## What's New (v1.0.0):
 
 The original add-on imported geometry with basic material name assignment but no textures, no rig, and no skin weights. The following has been added:
 
@@ -44,7 +44,7 @@ The original add-on imported geometry with basic material name assignment but no
   
 + **Unskinned mesh handling** — Meshes with no skin weights (rigid accessories, hair stubs with empty controllers) are now automatically parented to the armature object so they move with the rig.
   
-+ **Placeholder bone filtering**— Exporters that write NotABone placeholder entries in skin controllers no longer corrupt vertex group assignments. Placeholders are silently skipped while real bone weights are applied correctly.
++ **Placeholder bone filtering** — Exporters that write NotABone placeholder entries in skin controllers no longer corrupt vertex group assignments. Placeholders are silently skipped while real bone weights are applied correctly.
   
 + **Vertices-block normal/UV support** — Some exporters (notably Wii-era models) declare normals and UVs inside the <vertices> block rather than as separate primitive inputs. These are now read correctly, fixing flat shading on affected models.
   
@@ -56,10 +56,17 @@ The original add-on imported geometry with basic material name assignment but no
   
 + **Bad diffuse correction expanded** — Extended to catch more exporter-specific misassignments including specular and bump maps placed in the diffuse slot.
 
++ **Visual Scene Support** — Full assembly of multi-part scenes. Preserves relative positions, rotations, and scales of all objects (Translation, Rotation, Scale tags supported).
+
++ **Second Life / Firestorm Hardening** — Advanced ID scavenging to fix "Missing POSITION source" errors common in SL/Firestorm exports. Automatically handles non-standard ID prefixes for robust geometry recovery.
+
++ **Blender 5.1.0 Ready** — Updated metadata and syntax for the modern V5 extension system.
+
 
 ### Notes
 
-+ Tested on Blender 5.0
++ Tested on Blender 5.1.0 (Flatpak & Local)
 + Skin weights require the mesh and armature to be exported together in the same .dae file
 + Normal maps on models with multiple UV channels may need to be connected manually in the shader editor
-
++ Skin weights require the mesh and armature to be exported together in the same .dae file
++ Normal maps on models with multiple UV channels may need to be connected manually in the shader editor
