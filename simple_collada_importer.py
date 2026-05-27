@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Simple COLLADA (.dae) Importer",
     "author": "ekztal / MilesExilium / RebeccaNod1",
-    "version": (1, 0, 0),
+    "version": (3, 4, 0),
     "blender": (4, 0, 0),
     "location": "File > Import > Simple COLLADA (.dae)",
-    "description": "Imports COLLADA (.dae) files that contain meshes with positions, normals, UVs, vertex colors, textures, armature and skin weights.",
+    "description": "Imports COLLADA meshes with positions, normals, UVs, vertex colors, textures, armature and skin weights.",
     "category": "Import-Export",
     "support": "COMMUNITY",
 }
@@ -571,6 +571,7 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
     faces        = []
     face_mat_ids = []
     corner_uvs   = []
+    corner_uvs2  = []
     corner_cols  = []
     corner_norms = []
 
@@ -656,6 +657,7 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
 
         normal_offset = uv_offset = color_offset = None
         normal_source = uv_source = color_source = None
+        uv2_offset = None;  uv2_source = None   # second UV channel (set="1")
 
         # Scan ALL inputs (not just input_by_offset) so we catch TEXCOORD and COLOR
         # even when they share offset=0 with VERTEX (common in OoT/MM 3DS exports).
@@ -667,7 +669,9 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                 if color_source is None:
                     color_offset  = off;  color_source  = sources.get(src)
             elif sem == "TEXCOORD":
-                if uv_source is None or set_idx == "0":
+                if set_idx == "1":
+                    uv2_offset = off;  uv2_source = sources.get(src)
+                elif uv_source is None or set_idx == "0":
                     uv_offset = off;  uv_source = sources.get(src)
 
         # Fallback: check if NORMAL/TEXCOORD/COLOR were declared inside <vertices>
@@ -697,6 +701,7 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         for poly_vcount in vcounts:
             poly_vi   = []
             poly_uv   = []
+            poly_uv2  = []
             poly_col  = []
             poly_norm = []
 
@@ -720,7 +725,11 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                 if uv_offset is not None and uv_source:
                     ti = raw_idx[b + uv_offset]
                     uv = uv_source[ti] if 0 <= ti < len(uv_source) else (0,0)
-                    poly_uv.append((uv[0], uv[1]))  # raw V unchanged: COLLADA and Blender both use V=0 at bottom
+                    poly_uv.append((uv[0], uv[1]))
+                if uv2_offset is not None and uv2_source:
+                    ti2 = raw_idx[b + uv2_offset]
+                    uv2 = uv2_source[ti2] if 0 <= ti2 < len(uv2_source) else (0,0)
+                    poly_uv2.append((uv2[0], uv2[1]))  # raw V unchanged: COLLADA and Blender both use V=0 at bottom
 
             cursor += poly_vcount * num_inputs
 
@@ -730,9 +739,10 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                     continue
                 faces.append(tuple(tri_vi))
                 face_mat_ids.append(tri_mat_id)
-                if poly_norm: corner_norms.extend([poly_norm[0], poly_norm[i], poly_norm[i+1]])
-                if poly_col:  corner_cols.extend( [poly_col[0],  poly_col[i],  poly_col[i+1]])
-                if poly_uv:   corner_uvs.extend(  [poly_uv[0],   poly_uv[i],   poly_uv[i+1]])
+                if poly_norm:  corner_norms.extend([poly_norm[0], poly_norm[i], poly_norm[i+1]])
+                if poly_col:   corner_cols.extend( [poly_col[0],  poly_col[i],  poly_col[i+1]])
+                if poly_uv:    corner_uvs.extend(  [poly_uv[0],   poly_uv[i],   poly_uv[i+1]])
+                if poly_uv2:   corner_uvs2.extend( [poly_uv2[0],  poly_uv2[i],  poly_uv2[i+1]])
 
     if not positions or not faces:
         print("No valid geometry in:", geom_name)
@@ -891,6 +901,11 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         for li, uv in enumerate(corner_uvs):
             uv_layer.data[li].uv = uv
 
+    if import_uvs and corner_uvs2 and len(corner_uvs2) == len(mesh.loops):
+        uv_layer2 = mesh.uv_layers.new(name="UVMap.001")
+        for li, uv in enumerate(corner_uvs2):
+            uv_layer2.data[li].uv = uv
+
     # ── VERTEX COLORS ────────────────────────────────────────────────────────
     if import_vertex_colors and corner_cols and len(corner_cols) == len(mesh.loops):
         col_attr = mesh.color_attributes.new(name="Col", type="FLOAT_COLOR", domain="CORNER")
@@ -1007,27 +1022,32 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             self.report({'ERROR'}, f"File not found: {self.filepath}")
             return {'CANCELLED'}
 
-        try:
-            tree = ET.parse(self.filepath)
-            root = tree.getroot()
-        except ET.ParseError as e:
+        # Reuse the tree already parsed by _prescan if available (avoids double parse)
+        if hasattr(self, '_cached_root') and self._cached_root is not None:
+            root = self._cached_root
+            self._cached_root = None  # clear cache after use
+        else:
             try:
-                import re
-                with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
-                    raw = f.read()
-                raw = re.sub(r'<\w+:\w+[^>]*/>', '', raw)
-                raw = re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL)
-                raw = re.sub(r'<(\w+):(\w+)', r'<\2', raw)
-                raw = re.sub(r'</(\w+):(\w+)', r'</\2', raw)
-                raw = re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', raw)
-                raw = re.sub(r"\s+\w+:\w+\s*=\s*'[^']*'", '', raw)
-                root = ET.fromstring(raw)
-            except Exception as e2:
-                self.report({'ERROR'}, f"Failed to parse DAE: {e} / {e2}")
+                tree = ET.parse(self.filepath)
+                root = tree.getroot()
+            except ET.ParseError as e:
+                try:
+                    import re
+                    with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
+                        raw = f.read()
+                    raw = re.sub(r'<\w+:\w+[^>]*/>', '', raw)
+                    raw = re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL)
+                    raw = re.sub(r'<(\w+):(\w+)', r'<\2', raw)
+                    raw = re.sub(r'</(\w+):(\w+)', r'</\2', raw)
+                    raw = re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', raw)
+                    raw = re.sub(r"\s+\w+:\w+\s*=\s*'[^']*'", '', raw)
+                    root = ET.fromstring(raw)
+                except Exception as e2:
+                    self.report({'ERROR'}, f"Failed to parse DAE: {e} / {e2}")
+                    return {'CANCELLED'}
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to parse DAE: {e}")
                 return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to parse DAE: {e}")
-            return {'CANCELLED'}
 
         ns  = get_collada_ns(root)
         dae = self.filepath
@@ -1062,6 +1082,7 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             return {'CANCELLED'}
 
         imported = 0
+        imported_geom_ids = set()   # guard: never import same geometry twice
 
         def walk_scene(node, parent_mat):
             """
@@ -1080,7 +1101,8 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             for ig in node.findall(q(ns, "instance_geometry")):
                 geom_url_val = ig.attrib.get("url", "")
                 geom_id = geom_url_val[1:] if geom_url_val.startswith("#") else geom_url_val
-                if geom_id in geom_map:
+                if geom_id in geom_map and geom_id not in imported_geom_ids:
+                    imported_geom_ids.add(geom_id)
                     mat_override = geom_mat_override.get(geom_id, {})
                     obj = build_mesh_from_geometry(
                         geom_map[geom_id], ns, collection, material_texture_map,
@@ -1139,6 +1161,7 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             try:
                 _tree = ET.parse(self.filepath)
                 _root = _tree.getroot()
+                self._cached_root = _root   # cache so execute() doesn't re-parse
             except ET.ParseError:
                 with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
                     _raw = f.read()
